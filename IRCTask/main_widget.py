@@ -23,11 +23,14 @@ class MainWidget(qt_widgets.QWidget):
         self.username_widget = qt_widgets.QLineEdit()
         self.chat_input_widget = qt_widgets.QLineEdit()
         self.channels_list_widget = qt_widgets.QListWidget()
+        self.users_list_widget = qt_widgets.QListWidget()
         self.status_widget = qt_widgets.QLabel()
 
-        self.channels_info = []
+        self.last_message = ''
+        self.new_channel_data = False
 
         self.socket_thread = threading.Thread(target=self.establish_connection)
+        self.channel_thread = threading.Thread(target=self.collect_channels)
 
         self.channel_info_compiled_regex = re.compile(self.channel_info_regex)
 
@@ -48,6 +51,7 @@ class MainWidget(qt_widgets.QWidget):
         channel_name_label = qt_widgets.QLabel('Channel')
         username_label = qt_widgets.QLabel('Username')
         channels_list_label = qt_widgets.QLabel('Channels:')
+        users_list_label = qt_widgets.QLabel('Users')
 
         connect_button = qt_widgets.QPushButton('Connect', self)
         connect_button.setToolTip('Establish connection')
@@ -78,51 +82,62 @@ class MainWidget(qt_widgets.QWidget):
         grid.addWidget(send_button, 7, 2, 1, 1)
         grid.addWidget(self.chat_input_widget, 7, 3, 1, 1)
 
+        grid.addWidget(users_list_label, 1, 5)
+        grid.addWidget(self.users_list_widget, 2, 5, 5, 3)
+
         grid.addWidget(self.status_widget, 8, 0, 1, 3)
 
         return grid
 
-    def append_chat_text(self, text):
-        self.chat_text.append(text)
+    def handle_chat_text(self, text):
+        name = text.split('!', 1)[0][1:]
+        split_message = text.split('PRIVMSG', 1)
+        message = split_message[1].split(':', 1)[1]
+        self.chat_text_widget.append('{0}: {1}'.format(name, message))
 
-    def append_debug_text(self, text):
+    def handle_irc_message(self, text):
         self.status_widget.setText(text)
+
+        self.last_message = text
+
+        if text.find("PRIVMSG") != -1:
+            self.handle_chat_text(text)
+
         if self.irc_socket.is_searching_for_channels:
-            self.collect_channels_info(text)
+            self.new_channel_data = True
 
-    def collect_channels_info(self, text):
-        text = text.split('\n')
-        for channel in text:
-            channel_info_match = re.fullmatch(self.channel_info_compiled_regex,
-                                              channel)
-            if channel_info_match is None or \
-               channel_info_match.group(1) == 'Channel':
-                return
+    def collect_channels(self):
+        while True:
+            if self.new_channel_data:
+                channel_info_match = re.fullmatch(self.channel_info_compiled_regex,
+                                                  self.last_message)
+                if channel_info_match is None or \
+                        channel_info_match.group(1) == 'Channel':
+                    continue
 
-            if channel_info_match.group(1).startswith(':End'):
-                self.irc_socket.is_searching_for_channels = False
-                self.fill_channels_list()
-                return
+                if channel_info_match.group(1).startswith(':End'):
+                    self.irc_socket.is_searching_for_channels = False
+                    break
 
-            channel_info = ChannelInfo(channel_info_match.group(1),
-                                       channel_info_match.group(2),
-                                       channel_info_match.group(3)[1:])
-            self.channels_info.append(channel_info)
+                channel_info = ChannelInfo(channel_info_match.group(1),
+                                           channel_info_match.group(2),
+                                           channel_info_match.group(3)[1:])
+                list_item = qt_widgets.QListWidgetItem()
+                list_item.setData(0, channel_info)
+                list_item.setText(channel_info.full_name)
+                list_item.setToolTip("{0}\nUsers: {1}"
+                                     .format(channel_info.name,
+                                             channel_info.users_count))
+                self.channels_list_widget.addItem(list_item)
+                self.new_channel_data = False
 
-    def fill_channels_list(self):
-        for channel_info in self.channels_info:
-            list_item = qt_widgets.QListWidgetItem()
-            list_item.setData(0, channel_info)
-            list_item.setText(channel_info.full_name)
-            list_item.setToolTip("{0}\nUsers: {1}"
-                                 .format(channel_info.name,
-                                         channel_info.users_count))
-            self.channels_list_widget.addItem(list_item)
-
-    def send_user_message(self):
-        text = self.chat_input.text()
+    def send_user_message(self, target='def'):
+        message = self.chat_input.text()
         self.chat_input.clear()
-        self.irc_socket.send_message_to_chat(text)
+        if target == "def":
+            target = self.connected_channel_name
+        message = "PRIVMSG {0} :{1}".format(target, message)
+        self.irc_socket.send_message(message)
 
     def start_connection_thread(self):
         if self.socket_thread.is_alive():
@@ -141,11 +156,11 @@ class MainWidget(qt_widgets.QWidget):
             self.irc_socket = IRCSocket(self.connection_data.server,
                                         self.connection_data.port)
 
-            self.irc_socket.message_output_receiver = self.append_chat_text
-            self.irc_socket.debug_output_receiver = self.append_debug_text
+            self.irc_socket.output_receiver = self.handle_irc_message
 
             self.irc_socket.start_session(self.connection_data.channel,
                                           self.connection_data.user)
+            self.channel_thread.start()
         else:
             self.socket_thread.join()
 
@@ -163,6 +178,8 @@ class MainWidget(qt_widgets.QWidget):
                                                 qt_widgets.QMessageBox.No)
         if reply == qt_widgets.QMessageBox.Yes:
             self.irc_socket.disconnect()
+            if self.socket_thread.is_alive():
+                self.channel_thread.join()
             if self.socket_thread.is_alive():
                 self.socket_thread.join()
             event.accept()

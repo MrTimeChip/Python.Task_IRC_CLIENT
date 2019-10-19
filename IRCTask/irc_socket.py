@@ -13,8 +13,7 @@ class IRCSocket:
         self.connected_channel_name = "NONE"
         self.is_searching_for_channels = False
         self.messages_queue = Queue()
-        self.message_output_receiver = None
-        self.debug_output_receiver = None
+        self.output_receiver = None
         self.reading_thread = None
         self.writing_thread = None
         self.user = None
@@ -36,10 +35,15 @@ class IRCSocket:
     def join_channel(self, channel_name):
         self.socket.send(bytes("JOIN {} \n".format(channel_name), "UTF-8"))
         irc_message = ""
+        buffer = ''
         while irc_message.find("End of /NAMES list.") == -1:
             irc_message = self.socket.recv(2048).decode("UTF-8")
-            irc_message = irc_message.strip('\n\r')
-            self.handle_debug_message(irc_message)
+            buffer += irc_message
+            newline_pos = buffer.find('\r\n')
+            if not newline_pos == -1:
+                message_part = buffer[:newline_pos]
+                buffer = buffer[newline_pos + 2:]
+                self.handle_message(message_part)
         self.connected_channel_name = channel_name
 
     def start_session(self, channel_name, user):
@@ -61,50 +65,41 @@ class IRCSocket:
                 self.messages_queue.get()()
 
     def read_messages(self):
+        buffer = ''
         while self.connected:
             irc_message = self.socket.recv(2048).decode("UTF-8",
                                                         errors='replace')
-            irc_message = irc_message.strip('\n\r')
-            self.handle_debug_message(irc_message)
-            if irc_message.find("PRIVMSG") != -1:
-                name = irc_message.split('!', 1)[0][1:]
-                message = irc_message.split('PRIVMSG', 1)[1].split(':', 1)[1]
-                self.handle_message(name, message)
-            if irc_message.find("PING :") != -1:
-                self.ping()
+            buffer += irc_message
+            messages = buffer.split('\r\n')
+            for raw_message in messages[:-1]:
+                self.handle_message(raw_message)
+                if raw_message.find("PING :") != -1:
+                    self.ping()
+            buffer = ''
+            buffer += messages[-1]
+            self.reading_thread.sleep(1)
 
     def get_channels_list(self):
-        self.send_command_message('LIST')
+        self.send_message('LIST')
         self.is_searching_for_channels = True
 
-    def handle_message(self, name, message):
-        if self.message_output_receiver is not None:
-            self.message_output_receiver("{0}: {1}".format(name, message))
-
-    def handle_debug_message(self, message):
+    def handle_message(self, message):
         print(message)
-        if self.debug_output_receiver is not None:
-            self.debug_output_receiver(message)
+        if self.output_receiver is not None:
+            self.output_receiver(message)
 
-    def send_message_to_chat(self, message, target="def"):
-        if target == "def":
-            target = self.connected_channel_name
-        if message.startswith('/'):
-            self.send_command_message(message[1:])
-            return
+    def send_message(self, message):
         self.messages_queue.put(lambda: self.socket.send(
-            bytes("PRIVMSG {0} :{1}\n".format(target, message), "UTF-8")))
-        self.handle_message(self.user.username, message)
-
-    def send_command_message(self, message):
-        self.messages_queue.put(lambda: self.socket.send(bytes(message + "\n",
-                                                               "UTF-8")))
+            bytes(message + "\n", "UTF-8")))
 
     def ping(self):
-        self.socket.send(bytes("PONG :pingisn", "UTF-8"))
+        self.send_message("PONG :pingisn")
 
     def disconnect(self):
-        self.connected = False
-        self.send_command_message("QUIT")
-        self.reading_thread.join()
-        self.writing_thread.join()
+        if self.connected:
+            self.send_message("QUIT")
+            self.connected = False
+        if self.reading_thread.is_alive():
+            self.reading_thread.join()
+        if self.writing_thread.is_alive():
+            self.writing_thread.join()
