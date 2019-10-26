@@ -15,8 +15,6 @@ class IRCClient:
         self.connection_data.user = User("")
         self.last_message = '...'
 
-        self.status_update_handler = None
-
         self.__new_channel_data = False
 
         self.__channel_compiled_regex = re.compile(self.channel_regex)
@@ -24,8 +22,12 @@ class IRCClient:
         self.__socket_thread = thr.Thread(target=self.establish_connection)
         self.__channel_thread = thr.Thread(target=self.__collect_channels)
 
+        self.status_update_handler = None
+
         self.chat_handler = None
         self.channel_data_handler = None
+
+        self.on_connected_to_server = None
 
     def establish_connection(self):
         if self.check_connection_data():
@@ -35,7 +37,10 @@ class IRCClient:
             self.__irc_socket.output_receiver = self.handle_irc_message
             self.__irc_socket.connect_to_server()
 
-            self.__irc_socket.send_user_data(self.connection_data.user)
+            if self.__irc_socket.connected:
+                self.__irc_socket.send_user_data(self.connection_data.user)
+                if self.on_connected_to_server is not None:
+                    self.on_connected_to_server()
         else:
             self.__socket_thread.join()
 
