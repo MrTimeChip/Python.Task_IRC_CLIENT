@@ -1,2 +1,3 @@
+pytest
 PyQt5-sip>=12.7.0
 PyQt5>=5.13.1
